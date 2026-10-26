@@ -223,7 +223,7 @@ Retries
 ^^^^^^^
 
 ``max.retries``
-  The maximum number of times to retry on errors before failing the task.
+  The maximum number of times to retry on errors before failing the task, or, when a dead letter queue or error logging is configured, before reporting the records the database rejects as invalid data as errant records.
 
   * Type: int
   * Default: 10

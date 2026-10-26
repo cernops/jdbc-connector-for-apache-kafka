@@ -87,7 +87,9 @@ public class JdbcSinkConfig extends JdbcConfig {
     public static final String MAX_RETRIES = "max.retries";
     private static final int MAX_RETRIES_DEFAULT = 10;
     private static final String MAX_RETRIES_DOC =
-        "The maximum number of times to retry on errors before failing the task.";
+        "The maximum number of times to retry on errors before failing the task, or, when a dead "
+            + "letter queue or error logging is configured, before reporting the records the database "
+            + "rejects as invalid data as errant records.";
     private static final String MAX_RETRIES_DISPLAY = "Maximum Retries";
 
     public static final String RETRY_BACKOFF_MS = "retry.backoff.ms";

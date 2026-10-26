@@ -362,4 +362,22 @@ public class JdbcDbWriterTest {
         )).isEqualTo(numRecords);
     }
 
+    @Test
+    public void failedWriteLeavesNothingToCommit() throws SQLException {
+        final String table = "failed_write";
+        sqliteHelper.createTable("CREATE TABLE " + table + " (id INTEGER PRIMARY KEY);");
+        final Map<String, String> props = new HashMap<>();
+        props.put("connection.url", sqliteHelper.sqliteUri());
+        props.put("table.name.format", table);
+        writer = newWriter(props);
+        final Schema schema = SchemaBuilder.struct().field("id", Schema.INT32_SCHEMA).build();
+        final SinkRecord record = new SinkRecord("topic", 0, null, null, schema, new Struct(schema).put("id", 1), 0);
+
+        assertThatThrownBy(() -> writer.write(Collections.nCopies(2, record))).isInstanceOf(SQLException.class);
+        // What Oracle's driver does with an open transaction when the connection is closed.
+        writer.cachedConnectionProvider.getConnection().commit();
+
+        assertThat(sqliteHelper.select("SELECT * FROM " + table, rs -> { })).isZero();
+    }
+
 }

@@ -246,6 +246,51 @@ following auto-evolution limitations apply:
 
 To enable table auto-evolution, set `auto.evolve=true`.
 
+## Error Handling
+
+When the database rejects a batch of records, the connector retries the
+batch up to `max.retries` times, waiting `retry.backoff.ms` between
+attempts. What happens once the retries are exhausted depends on the
+Kafka Connect error handling configuration:
+- If a dead letter queue (`errors.deadletterqueue.topic.name`) or error
+  logging (`errors.log.enable=true`) is configured, the connector writes
+  the records one at a time and reports each record the database rejects
+  as invalid data as an errant record. With `errors.tolerance=all` the
+  task skips those records and keeps running; with `errors.tolerance=none`
+  it fails.
+- Otherwise, the task fails.
+
+A record counts as invalid data when the database fails it with a
+SQLSTATE of class `22` (data exception, e.g. a value too long or out of
+range), class `23` (integrity constraint violation, e.g. a duplicate key
+or a null in a `NOT NULL` column) or `42804` (datatype mismatch). Any
+other failure, such as a permission error, a missing table or column, or
+the database being unreachable, fails the task instead of being
+reported. Drivers that do not report SQLSTATEs, such as SQLite's,
+therefore always fail the task.
+
+A SQLSTATE says what failed, not why, so a change to the table can look
+like invalid data. If a column changes type, or a `NOT NULL` column
+without a default is added, every insert fails with one of these
+SQLSTATEs: with `errors.tolerance=all` every record then goes to the
+dead letter queue while the task keeps running and the table receives
+nothing. Alert on the task's `total-record-failures` and
+`deadletterqueue-produce-requests` metrics (MBean
+`kafka.connect:type=task-error-metrics`), and keep the dead letter
+queue's retention long enough to replay what it holds.
+
+A batch with a rejected record is retried `max.retries` times before
+anything is reported, which holds up all of the task's partitions for up
+to `max.retries` × `retry.backoff.ms` (30 seconds by default). Retrying
+helps when a record fails only because of ordering, such as a child row
+arriving before its parent; lower `max.retries` if that cannot happen.
+
+Kafka Connect delivers records at least once, so after a rebalance or a
+restart some records are written again. In `insert` mode with a primary
+key, a record already in the table then fails with a duplicate key and
+is reported to the dead letter queue; use `upsert` mode to make
+redelivery idempotent.
+
 ## Data Mapping
 
 The nullability of a column is based on the optionality of the

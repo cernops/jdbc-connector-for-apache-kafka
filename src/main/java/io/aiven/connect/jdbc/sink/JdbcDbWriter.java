@@ -63,27 +63,45 @@ public class JdbcDbWriter {
         };
     }
 
+    /**
+     * Writes the records in a single transaction. If the write fails, the transaction is rolled
+     * back before the failure is rethrown, so nothing the write did can be committed later:
+     * closing the connection is not enough, as some drivers, such as Oracle's, commit an open
+     * transaction when the connection is closed.
+     */
     void write(final Collection<SinkRecord> records) throws SQLException {
         final Connection connection = cachedConnectionProvider.getConnection();
-
-        final Map<TableId, BufferedRecords> bufferByTable = new HashMap<>();
-        for (final SinkRecord record : records) {
-            final TableId tableId = destinationTable(record.topic());
-            BufferedRecords buffer = bufferByTable.get(tableId);
-            if (buffer == null) {
-                buffer = new BufferedRecords(config, tableId, dbDialect, dbStructure, connection);
-                bufferByTable.put(tableId, buffer);
+        try {
+            final Map<TableId, BufferedRecords> bufferByTable = new HashMap<>();
+            for (final SinkRecord record : records) {
+                final TableId tableId = destinationTable(record.topic());
+                BufferedRecords buffer = bufferByTable.get(tableId);
+                if (buffer == null) {
+                    buffer = new BufferedRecords(config, tableId, dbDialect, dbStructure, connection);
+                    bufferByTable.put(tableId, buffer);
+                }
+                buffer.add(record);
             }
-            buffer.add(record);
+            for (final Map.Entry<TableId, BufferedRecords> entry : bufferByTable.entrySet()) {
+                final TableId tableId = entry.getKey();
+                final BufferedRecords buffer = entry.getValue();
+                log.debug("Flushing records in JDBC Writer for table ID: {}", tableId);
+                buffer.flush();
+                buffer.close();
+            }
+            connection.commit();
+        } catch (final SQLException | RuntimeException e) {
+            rollback(connection, e);
+            throw e;
         }
-        for (final Map.Entry<TableId, BufferedRecords> entry : bufferByTable.entrySet()) {
-            final TableId tableId = entry.getKey();
-            final BufferedRecords buffer = entry.getValue();
-            log.debug("Flushing records in JDBC Writer for table ID: {}", tableId);
-            buffer.flush();
-            buffer.close();
+    }
+
+    private static void rollback(final Connection connection, final Exception failure) {
+        try {
+            connection.rollback();
+        } catch (final SQLException e) {
+            failure.addSuppressed(e);
         }
-        connection.commit();
     }
 
     void closeQuietly() {

@@ -25,6 +25,7 @@ import java.util.concurrent.Future;
 
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.TopicPartition;
 
 import io.aiven.connect.jdbc.JdbcSinkConnector;
 
@@ -70,6 +71,12 @@ public class VerifyInsertIT extends AbstractPostgresIT {
             + "    \"name\" VARCHAR(255) NOT NULL,\n"
             + "    \"value\" VARCHAR(255) NOT NULL\n"
             + ")", TEST_TOPIC_NAME);
+    private static final String CREATE_TABLE_WITH_SHORT_VALUE = String.format("CREATE TABLE \"%s\" (\n"
+            + "    \"id\" VARCHAR(30) NOT NULL,\n"
+            + "    \"name\" VARCHAR(255) NOT NULL,\n"
+            + "    \"value\" VARCHAR(5) NOT NULL\n"
+            + ")", TEST_TOPIC_NAME);
+    private static final String DEAD_LETTER_QUEUE = "sink_topic_dlq";
 
 
     private Map<String, String> basicSinkConnectorConfig() {
@@ -207,5 +214,41 @@ public class VerifyInsertIT extends AbstractPostgresIT {
                             .value().isEqualTo("3")
                             .value().isEqualTo("4");
                 });
+    }
+
+    @Test
+    public void testSinkConnectorReportsRecordsTheDatabaseRejects() throws Exception {
+        // A value too long for its column goes to the dead letter queue, and the records around it
+        // in the same batch are still written
+        executeSqlStatement(CREATE_TABLE_WITH_SHORT_VALUE);
+        final List<Future<RecordMetadata>> sendFutures = List.of(
+                producer.send(createRecord(0, 0, "user-0", "ok")),
+                producer.send(createRecord(1, 0, "user-1", "far too long")),
+                producer.send(createRecord(2, 0, "user-2", "ok")));
+        producer.flush();
+        for (final Future<RecordMetadata> sendFuture : sendFutures) {
+            sendFuture.get();
+        }
+
+        final Map<String, String> config = basicSinkConnectorConfig();
+        config.put("max.retries", "0");
+        config.put("errors.tolerance", "all");
+        config.put("errors.deadletterqueue.topic.name", DEAD_LETTER_QUEUE);
+        config.put("errors.deadletterqueue.topic.replication.factor", "1");
+        connectRunner.createConnector(config);
+
+        await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(table(TEST_TOPIC_NAME)).hasNumberOfRows(2);
+                    assertThat(table(TEST_TOPIC_NAME)).column("ID")
+                            .value().isEqualTo("0")
+                            .value().isEqualTo("2");
+                });
+        final List<Object> reportedIds = new ArrayList<>();
+        consumer.assign(List.of(new TopicPartition(DEAD_LETTER_QUEUE, 0)));
+        await().atMost(Duration.ofSeconds(30)).until(() -> {
+            consumer.poll(Duration.ofSeconds(1)).forEach(record -> reportedIds.add(record.value().get("id")));
+            return reportedIds.equals(List.of(1));
+        });
     }
 }
